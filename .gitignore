@@ -1,0 +1,57 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Reference docs and external cloned projects
+docs/reference/
+reference/
+
+# CodeGraph local indexing
+.codegraph/
+
+# Build artifacts
+target/
+
+# Test and coverage caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# System and file manager artifacts
+Thumbs.db
+desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+*.lnk
+.directory
+.Trash-*
+
+# Temporary / log files / backups / environments
+*.log
+*.bak
+*.tmp
+.env
+.env.*
+tmp/
+
+# Certificates and private keys
+*.pem
+*.key
+*.pfx
+*.p12
