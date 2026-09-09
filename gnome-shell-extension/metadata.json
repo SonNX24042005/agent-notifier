@@ -1,0 +1,7 @@
+{
+  "uuid": "ai-agent-desktop-notifier@sonnx24042005",
+  "name": "AI agent desktop notifier window focus",
+  "description": "Focuses the exact native Wayland window selected by AI agent desktop notifier.",
+  "shell-version": ["42", "43", "44", "45", "46", "47", "48", "49", "50"],
+  "version": 4
+}

@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""
+anoti - AI Agent Desktop Notifier CLI
+
+Fast, modern, and ergonomic command-line tool for managing, updating,
+testing, and triggering multi-monitor AI desktop notifications on Linux and Windows.
+"""
+
+import os
+import sys
+import json
+import argparse
+import subprocess
+from pathlib import Path
+
+VERSION = "1.3.0"
+IS_WINDOWS = sys.platform == "win32" or os.name == "nt"
+USER_HOME = Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or os.path.expanduser("~"))
+LOCAL_BIN = USER_HOME / ".local" / "bin"
+NOTIFIER_PY = LOCAL_BIN / "multi-desktop-notify.py"
+CONFIG_FILE = USER_HOME / ".config" / "ai-agent-notifier" / "config.json"
+REPO_URL = "https://github.com/SonNX24042005/agent-notifier.git"
+
+
+def get_repo_dir() -> Path | None:
+    """Finds the local repository directory if available."""
+    script_path = Path(os.path.realpath(__file__))
+    check_file = "install.ps1" if IS_WINDOWS else "install.sh"
+    for candidate in (script_path.parent, script_path.parent.parent):
+        if (candidate / "scripts" / check_file).exists():
+            return candidate
+        if (candidate / check_file).exists():
+            return candidate
+    return None
+
+
+def cmd_focus():
+    """Focuses the application window of the current pending notification."""
+    if not NOTIFIER_PY.exists():
+        print(f"[ERROR] Engine thong bao khong ton tai tai {NOTIFIER_PY}.")
+        print("[HINT] Chay 'anoti install' de cai dat.")
+        return 1
+    res = subprocess.run([sys.executable, str(NOTIFIER_PY), "--focus"])
+    return res.returncode
+
+
+def cmd_test(title="Kiểm tra thông báo", message="Hệ thống thông báo hoạt động bình thường trên tất cả các màn hình."):
+    """Sends a test desktop notification across all connected monitors."""
+    print("[INFO] Dang gui thong bao thu nghiem len tat ca cac man hinh...")
+    if not NOTIFIER_PY.exists():
+        print(f"[ERROR] Engine thong bao khong ton tai tai {NOTIFIER_PY}.")
+        print("[HINT] Chay 'anoti install' de cai dat.")
+        return 1
+
+    caller_pid = os.getppid() if hasattr(os, "getppid") else os.getpid()
+    caller_win = ""
+    if not IS_WINDOWS:
+        try:
+            caller_win = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL).decode().strip()
+        except Exception:
+            caller_win = ""
+    else:
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if hwnd:
+                caller_win = str(hwnd)
+        except Exception:
+            caller_win = ""
+
+    project_hint = os.path.basename(os.getcwd().rstrip("/\\")) if os.getcwd() not in ["/", "\\"] else ""
+    session_id = f"anoti-test-{os.getpid()}"
+
+    cmd = [
+        sys.executable,
+        str(NOTIFIER_PY),
+        "--app-name=AI Agent Notifier",
+        f"--title={title}",
+        f"--message={message}",
+        f"--window-id={caller_win}",
+        f"--caller-pid={caller_pid}",
+        f"--project-hint={project_hint}",
+        f"--session-id={session_id}",
+        "--timeout=0",
+        "--auto-dismiss-delay=1.5",
+    ]
+    if not IS_WINDOWS:
+        cmd.append("--sound=/usr/share/sounds/freedesktop/stereo/complete.oga")
+
+    res = subprocess.run(cmd)
+    if res.returncode == 0:
+        print("[OK] Da gui thong bao thanh cong.")
+    return res.returncode
+
+
+def cmd_status():
+    """Checks the integration status for Claude Code, Antigravity, and Codex."""
+    print("=" * 60)
+    print(f"anoti (AI Agent Desktop Notifier) v{VERSION} - {'Windows' if IS_WINDOWS else 'Linux'}")
+    print("=" * 60)
+
+    # 1. Engine
+    engine_ok = NOTIFIER_PY.exists()
+    print(f"- Core Engine:       {'[OK] Da cai dat (' + str(NOTIFIER_PY) + ')' if engine_ok else '[ERROR] Chua cai dat'}")
+
+    # 2. Global Shortcut
+    if IS_WINDOWS:
+        print("- Shortcut/Focus:    [OK] Alt+Q tren popup hoac chay lenh: anoti focus")
+    else:
+        shortcut_ok = False
+        try:
+            out = subprocess.check_output(
+                ["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/anoti-focus/", "binding"],
+                stderr=subprocess.DEVNULL
+            ).decode().strip()
+            shortcut_ok = "<Alt>q" in out
+        except Exception:
+            pass
+        print(f"- Global Shortcut:   {'[OK] Alt+Q -> anoti focus' if shortcut_ok else '[-] Chua dang ky phim tat toan cuc'}")
+
+    # 3. Claude Code
+    claude_settings = USER_HOME / ".claude" / "settings.json"
+    claude_hook = USER_HOME / ".claude" / "hooks" / ("notify-claude.py" if IS_WINDOWS else "notify-input.sh")
+    claude_ok = False
+    if claude_settings.exists() and (claude_hook.exists() or (USER_HOME / ".claude" / "hooks" / "notify-claude.py").exists()):
+        try:
+            with open(claude_settings, "r") as f:
+                data = json.load(f)
+            claude_ok = "hooks" in data
+        except Exception:
+            pass
+    print(f"- Claude Code:       {'[OK] Da tich hop hook' if claude_ok else '[-] Chua cau hinh'}")
+
+    # 4. Antigravity
+    gemini_script = USER_HOME / ".gemini" / "hooks" / ("notify-antigravity.py" if IS_WINDOWS else "notify-antigravity.sh")
+    for label, config_dir in (("Antigravity", "config"), ("Antigravity CLI", "antigravity-cli")):
+        gemini_hooks = USER_HOME / ".gemini" / config_dir / "hooks.json"
+        gemini_ok = False
+        if gemini_hooks.exists() and gemini_script.exists():
+            try:
+                data = json.loads(gemini_hooks.read_text(encoding="utf-8"))
+                definition = data.get("desktop-notifier")
+                gemini_ok = isinstance(definition, dict) and bool(definition) and definition.get("enabled", True) is not False
+            except (OSError, ValueError, AttributeError):
+                pass
+        print(f"- {label + ':':18} {'[OK] Da tich hop hook' if gemini_ok else '[-] Chua cau hinh'}")
+
+    # 5. Codex
+    codex_hooks = USER_HOME / ".codex" / "hooks.json"
+    codex_script = USER_HOME / ".codex" / "notify.py"
+    codex_ok = False
+    if codex_hooks.exists() and codex_script.exists():
+        try:
+            import runpy
+            readable_command = runpy.run_path(str(codex_script))["readable_hook_command"]
+            hooks = json.loads(codex_hooks.read_text(encoding="utf-8")).get("hooks", {})
+            codex_ok = all(any(
+                "notify.py" in readable_command(handler.get("command", ""))
+                for entry in hooks.get(event, []) if isinstance(entry, dict)
+                for handler in entry.get("hooks", []) if isinstance(handler, dict)
+            ) for event in ("SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"))
+        except Exception:
+            pass
+    print(f"- OpenAI Codex:      {'[OK] Da tich hop hook' if codex_ok else '[-] Chua cau hinh'}")
+
+    # 6. Webhooks
+    webhook_ok = CONFIG_FILE.exists()
+    print(f"- Remote Webhooks:   {'[OK] Da cau hinh (' + str(CONFIG_FILE) + ')' if webhook_ok else '[-] Chua cau hinh (Tuy chon)'}")
+
+    print("=" * 60)
+    return 0
+
+
+def cmd_update():
+    """Updates AI Agent Desktop Notifier to the latest version."""
+    print("[INFO] Dang cap nhat AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if IS_WINDOWS:
+        if repo_dir and (repo_dir / "update.ps1").exists():
+            update_script = repo_dir / "update.ps1"
+            res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(update_script)])
+            return res.returncode
+        print("[ERROR] Khong tim thay update.ps1 cuc bo. Vui long cap nhat tu thu muc repository hoac ban release chinh thuc.")
+        return 1
+
+    if repo_dir and (repo_dir / "update.sh").exists():
+        update_script = repo_dir / "update.sh"
+        res = subprocess.run(["bash", str(update_script)])
+        return res.returncode
+
+    print("[ERROR] Khong tim thay update.sh cuc bo. Vui long cap nhat tu thu muc repository hoac ban release chinh thuc.")
+    return 1
+
+
+def cmd_uninstall():
+    """Uninstalls AI Agent Desktop Notifier and restores configuration backups."""
+    print("[INFO] Dang go cai dat AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if IS_WINDOWS:
+        candidate = (repo_dir / "scripts" / "uninstall.ps1") if repo_dir else None
+        if candidate and candidate.exists():
+            uninstall_script = candidate
+        elif repo_dir and (repo_dir / "uninstall.ps1").exists():
+            uninstall_script = repo_dir / "uninstall.ps1"
+        else:
+            uninstall_script = None
+
+        if uninstall_script:
+            res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(uninstall_script)])
+            return res.returncode
+        print("[ERROR] Khong tim thay uninstall.ps1 cuc bo. Vui long go cai dat tu thu muc repository.")
+        return 1
+
+    candidate = (repo_dir / "scripts" / "uninstall.sh") if repo_dir else None
+    if candidate and candidate.exists():
+        uninstall_script = candidate
+    elif repo_dir and (repo_dir / "uninstall.sh").exists():
+        uninstall_script = repo_dir / "uninstall.sh"
+    else:
+        uninstall_script = None
+
+    if uninstall_script:
+        res = subprocess.run(["bash", str(uninstall_script)])
+        return res.returncode
+
+    print("[ERROR] Khong tim thay uninstall.sh cuc bo. Vui long go cai dat tu thu muc repository.")
+    return 1
+
+
+def cmd_install():
+    """Installs or re-installs AI Agent Desktop Notifier."""
+    print("[INFO] Dang cai dat AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if IS_WINDOWS:
+        candidate = (repo_dir / "scripts" / "install.ps1") if repo_dir else None
+        if candidate and candidate.exists():
+            install_script = candidate
+        elif repo_dir and (repo_dir / "install.ps1").exists():
+            install_script = repo_dir / "install.ps1"
+        else:
+            install_script = None
+
+        if install_script:
+            res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(install_script)])
+            return res.returncode
+        print("[ERROR] Khong tim thay install.ps1 cuc bo.")
+        return 1
+
+    candidate = (repo_dir / "scripts" / "install.sh") if repo_dir else None
+    if candidate and candidate.exists():
+        install_script = candidate
+    elif repo_dir and (repo_dir / "install.sh").exists():
+        install_script = repo_dir / "install.sh"
+    else:
+        install_script = None
+
+    if install_script:
+        res = subprocess.run(["bash", str(install_script)])
+        return res.returncode
+
+    print("[ERROR] Khong tim thay install.sh cuc bo.")
+    return 1
+
+
+def cmd_config():
+    """Views or edits the webhook configuration."""
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        template = {
+            "webhooks": {
+                "slack": "",
+                "discord": "",
+                "bark": "",
+                "ntfy": "",
+                "feishu": "",
+                "dingtalk": ""
+            }
+        }
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(template, f, indent=2)
+        print(f"[OK] Da tao tep cau hinh mau tai {CONFIG_FILE}")
+
+    print(f"Duong dan tep cau hinh webhook: {CONFIG_FILE}")
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            print(f.read())
+    except Exception as e:
+        print(f"Loi doc tep cau hinh: {e}")
+    return 0
+
+
+def cmd_doctor():
+    """Runs a deep health check and diagnoses discrepancies between repo and installed runtime."""
+    print("=" * 60)
+    print(f"anoti Doctor (AI Agent Desktop Notifier) v{VERSION}")
+    print("=" * 60)
+
+    issues = 0
+    # 1. Check installed runtime engine
+    if not NOTIFIER_PY.exists():
+        print(f"[ERROR] Engine thong bao chua duoc cai dat tai: {NOTIFIER_PY}")
+        print("        Khuyen nghi: Chay 'anoti install' de cai dat.")
+        issues += 1
+    else:
+        print(f"[OK] Engine da cai dat tai: {NOTIFIER_PY}")
+        # Compare hash with repo if in repo
+        repo_dir = get_repo_dir()
+        if repo_dir:
+            repo_engine = repo_dir / "bin" / "multi-desktop-notify.py"
+            if repo_engine.exists():
+                import hashlib
+                with open(NOTIFIER_PY, "rb") as f1, open(repo_engine, "rb") as f2:
+                    h_installed = hashlib.sha256(f1.read()).hexdigest()
+                    h_repo = hashlib.sha256(f2.read()).hexdigest()
+                if h_installed != h_repo:
+                    print("[WARNING] File engine da cai dat KHAC voi ban ma nguon trong repository!")
+                    print("          Khuyen nghi: Chay 'anoti install' hoac './scripts/install.sh' de dong bo.")
+                    issues += 1
+                else:
+                    print("[OK] Phien ban engine da dong bo 100% voi repository.")
+
+    # 2. Check dependencies
+    if not IS_WINDOWS:
+        for tool in ["xdotool", "wmctrl", "paplay"]:
+            res = subprocess.run(["which", tool], capture_output=True, text=True)
+            if res.returncode == 0:
+                print(f"[OK] Dependency: {tool} san sang ({res.stdout.strip()})")
+            else:
+                print(f"[WARNING] Dependency: {tool} chua duoc cai dat.")
+                issues += 1
+
+    # 3. Check Session / Queue cache permissions
+    runtime_dir = USER_HOME / ".local" / "state" / "ai-agent-notifier"
+    if runtime_dir.exists():
+        print(f"[OK] Runtime state directory: {runtime_dir}")
+    else:
+        print("[-] Runtime state directory chua duoc tao (se tu dong khoi tao khi chay).")
+
+    print("-" * 60)
+    if issues == 0:
+        print("[OK] He thong hoat dong hoan hao, khong phat hien van de nao.")
+    else:
+        print(f"[!] Phat hien {issues} van de can luu y.")
+    print("=" * 60)
+    return 0 if issues == 0 else 1
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("update", "up"):
+        sys.exit(cmd_update())
+    elif argv and argv[0] in ("uninstall", "remove", "rm"):
+        sys.exit(cmd_uninstall())
+    elif argv and argv[0] in ("install", "reinstall"):
+        sys.exit(cmd_install())
+    elif argv and argv[0] in ("doctor", "doc", "check"):
+        sys.exit(cmd_doctor())
+    elif argv and argv[0] in ("focus", "f"):
+        sys.exit(cmd_focus())
+    elif argv and argv[0] in ("test", "t"):
+        title = argv[1] if len(argv) > 1 else "Kiểm tra thông báo"
+        msg = argv[2] if len(argv) > 2 else "Hệ thống thông báo hoạt động bình thường trên tất cả các màn hình."
+        sys.exit(cmd_test(title, msg))
+    elif argv and argv[0] in ("status", "st", "info"):
+        sys.exit(cmd_status())
+    elif argv and argv[0] in ("config", "cfg"):
+        sys.exit(cmd_config())
+
+    parser = argparse.ArgumentParser(
+        prog="anoti",
+        description="anoti - Fast, multi-monitor desktop notification CLI for AI agents (Claude Code, Antigravity, Codex).",
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        choices=["update", "uninstall", "install", "doctor", "test", "status", "config", "focus"],
+        help="Action to perform (update, uninstall, install, doctor, test, status, config, focus)",
+    )
+    parser.add_argument(
+        "--focus", "-f",
+        dest="flag_focus",
+        action="store_true",
+        help="Focus the application window waiting for agent input.",
+    )
+    parser.add_argument(
+        "--update", "-u",
+        dest="flag_update",
+        action="store_true",
+        help="Update notification system to the latest version.",
+    )
+    parser.add_argument(
+        "--uninstall",
+        dest="flag_uninstall",
+        action="store_true",
+        help="Uninstall notification system and restore backups.",
+    )
+    parser.add_argument(
+        "--install",
+        dest="flag_install",
+        action="store_true",
+        help="Install or re-install notification system.",
+    )
+    parser.add_argument(
+        "--test", "-t",
+        dest="flag_test",
+        action="store_true",
+        help="Send a test desktop notification across all monitors.",
+    )
+    parser.add_argument(
+        "--status", "-s",
+        dest="flag_status",
+        action="store_true",
+        help="Show integration and health status.",
+    )
+    parser.add_argument(
+        "--config", "-c",
+        dest="flag_config",
+        action="store_true",
+        help="View or setup webhook configuration.",
+    )
+    parser.add_argument(
+        "--title",
+        default="AI Agent Notification",
+        help="Notification title for custom message.",
+    )
+    parser.add_argument(
+        "--message", "-m",
+        default="",
+        help="Notification body text for custom message.",
+    )
+    parser.add_argument(
+        "--version", "-v",
+        action="store_true",
+        help="Show anoti version.",
+    )
+
+    args = parser.parse_args()
+
+    if args.version:
+        print(f"anoti v{VERSION}")
+        sys.exit(0)
+
+    if args.flag_focus or args.action == "focus":
+        sys.exit(cmd_focus())
+    if args.flag_update or args.action == "update":
+        sys.exit(cmd_update())
+    if args.flag_uninstall or args.action == "uninstall":
+        sys.exit(cmd_uninstall())
+    if args.flag_install or args.action == "install":
+        sys.exit(cmd_install())
+    if args.flag_test or args.action == "test":
+        sys.exit(cmd_test())
+    if args.flag_status or args.action == "status":
+        sys.exit(cmd_status())
+    if args.flag_config or args.action == "config":
+        sys.exit(cmd_config())
+
+    if args.message:
+        sys.exit(cmd_test(args.title, args.message))
+
+    cmd_status()
+    print("\nCac lenh nhanh:")
+    print("   anoti focus        # Focus ngay vao cua so AI agent dang cho phan hoi (Alt+Q)")
+    print("   anoti update       # Cap nhat phien ban moi nhat")
+    print("   anoti test         # Ban thong bao thu nghiem")
+    print("   anoti status       # Kiem tra trang thai tich hop")
+    print("   anoti uninstall    # Go cai dat va khoi phuc cau hinh")
+    print("   anoti --help       # Xem danh sach tuy chon\n")
+
+
+if __name__ == "__main__":
+    main()
