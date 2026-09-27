@@ -1,0 +1,732 @@
+#!/usr/bin/env python3
+"""
+anoti - AI Agent Desktop Notifier CLI
+
+Fast, modern, and ergonomic command-line tool for managing, updating,
+testing, and triggering multi-monitor AI desktop notifications on Linux and Windows.
+"""
+
+import os
+import sys
+import json
+import argparse
+import subprocess
+from pathlib import Path
+
+VERSION = "1.3.1"
+IS_WINDOWS = sys.platform == "win32" or os.name == "nt"
+USER_HOME = Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or os.path.expanduser("~"))
+LOCAL_BIN = USER_HOME / ".local" / "bin"
+NOTIFIER_PY = LOCAL_BIN / "multi-desktop-notify.py"
+CONFIG_FILE = USER_HOME / ".config" / "ai-agent-notifier" / "config.json"
+REPO_URL = "https://github.com/SonNX24042005/agent-notifier.git"
+
+
+def get_repo_dir() -> Path | None:
+    """Finds the local repository directory if available."""
+    script_path = Path(os.path.realpath(__file__))
+    check_file = "install.ps1" if IS_WINDOWS else "install.sh"
+    for candidate in (script_path.parent, script_path.parent.parent):
+        if (candidate / "scripts" / check_file).exists():
+            return candidate
+        if (candidate / check_file).exists():
+            return candidate
+    return None
+
+
+def get_notifier_path() -> Path:
+    """Resolves the engine script or executable path across user, system, bundle, and repo locations."""
+    local_p = USER_HOME / ".local" / "bin" / "multi-desktop-notify.py"
+    if local_p.exists():
+        return local_p
+    sys_p = Path("/usr/share/ai-agent-desktop-notifier/bin/multi-desktop-notify.py")
+    if sys_p.exists():
+        return sys_p
+    script_dir = Path(os.path.realpath(__file__)).parent
+    for name in ("multi-desktop-notify.exe", "multi-desktop-notify.py"):
+        cand = script_dir / name
+        if cand.exists():
+            return cand
+    repo = get_repo_dir()
+    if repo:
+        cand = repo / "bin" / "multi-desktop-notify.py"
+        if cand.exists():
+            return cand
+    return NOTIFIER_PY
+
+
+def cmd_focus():
+    """Focuses the application window of the current pending notification."""
+    engine = get_notifier_path()
+    if not engine.exists():
+        print(f"[ERROR] Engine thong bao khong ton tai tai {engine}.")
+        print("[HINT] Chay 'anoti install' de cai dat.")
+        return 1
+    if engine.suffix.lower() == ".exe":
+        res = subprocess.run([str(engine), "--focus"])
+    else:
+        res = subprocess.run([sys.executable, str(engine), "--focus"])
+    return res.returncode
+
+
+def cmd_test(title="Kiểm tra thông báo", message="Hệ thống thông báo hoạt động bình thường trên tất cả các màn hình."):
+    """Sends a test desktop notification across all connected monitors."""
+    print("[INFO] Dang gui thong bao thu nghiem len tat ca cac man hinh...")
+    engine = get_notifier_path()
+    if not engine.exists():
+        print(f"[ERROR] Engine thong bao khong ton tai tai {engine}.")
+        print("[HINT] Chay 'anoti install' de cai dat.")
+        return 1
+
+    caller_pid = os.getppid() if hasattr(os, "getppid") else os.getpid()
+    caller_win = ""
+    if not IS_WINDOWS:
+        try:
+            caller_win = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL).decode().strip()
+        except Exception:
+            caller_win = ""
+    else:
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if hwnd:
+                caller_win = str(hwnd)
+        except Exception:
+            caller_win = ""
+
+    project_hint = os.path.basename(os.getcwd().rstrip("/\\")) if os.getcwd() not in ["/", "\\"] else ""
+    session_id = f"anoti-test-{os.getpid()}"
+
+    cmd_prefix = [str(engine)] if engine.suffix.lower() == ".exe" else [sys.executable, str(engine)]
+    cmd = cmd_prefix + [
+        "--app-name=AI Agent Notifier",
+        f"--title={title}",
+        f"--message={message}",
+        f"--window-id={caller_win}",
+        f"--caller-pid={caller_pid}",
+        f"--project-hint={project_hint}",
+        f"--session-id={session_id}",
+        "--timeout=0",
+        "--auto-dismiss-delay=1.5",
+    ]
+    if not IS_WINDOWS:
+        cmd.append("--sound=/usr/share/sounds/freedesktop/stereo/complete.oga")
+
+    res = subprocess.run(cmd)
+    if res.returncode == 0:
+        print("[OK] Da gui thong bao thanh cong.")
+    return res.returncode
+
+
+def cmd_status():
+    """Checks the integration status for Claude Code, Antigravity, and Codex."""
+    print("=" * 60)
+    print(f"anoti (AI Agent Desktop Notifier) v{VERSION} - {'Windows' if IS_WINDOWS else 'Linux'}")
+    print("=" * 60)
+
+    # 1. Engine
+    engine = get_notifier_path()
+    engine_ok = engine.exists()
+    print(f"- Core Engine:       {'[OK] Da cai dat (' + str(engine) + ')' if engine_ok else '[ERROR] Chua cai dat'}")
+
+    # 2. Global Shortcut
+    if IS_WINDOWS:
+        print("- Shortcut/Focus:    [OK] Alt+Q tren popup hoac chay lenh: anoti focus")
+    else:
+        shortcut_ok = False
+        try:
+            out = subprocess.check_output(
+                ["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/anoti-focus/", "binding"],
+                stderr=subprocess.DEVNULL
+            ).decode().strip()
+            shortcut_ok = "<Alt>q" in out
+        except Exception:
+            pass
+        print(f"- Global Shortcut:   {'[OK] Alt+Q -> anoti focus' if shortcut_ok else '[-] Chua dang ky phim tat toan cuc'}")
+
+    # 3. Claude Code
+    claude_settings = USER_HOME / ".claude" / "settings.json"
+    claude_hook = USER_HOME / ".claude" / "hooks" / ("notify-claude.py" if IS_WINDOWS else "notify-input.sh")
+    claude_ok = False
+    if claude_settings.exists() and (claude_hook.exists() or (USER_HOME / ".claude" / "hooks" / "notify-claude.py").exists()):
+        try:
+            with open(claude_settings, "r") as f:
+                data = json.load(f)
+            claude_ok = "hooks" in data
+        except Exception:
+            pass
+    print(f"- Claude Code:       {'[OK] Da tich hop hook' if claude_ok else '[-] Chua cau hinh'}")
+
+    # 4. Antigravity
+    gemini_script = USER_HOME / ".gemini" / "hooks" / ("notify-antigravity.py" if IS_WINDOWS else "notify-antigravity.sh")
+    for label, config_dir in (("Antigravity", "config"), ("Antigravity CLI", "antigravity-cli")):
+        gemini_hooks = USER_HOME / ".gemini" / config_dir / "hooks.json"
+        gemini_ok = False
+        if gemini_hooks.exists() and gemini_script.exists():
+            try:
+                data = json.loads(gemini_hooks.read_text(encoding="utf-8"))
+                definition = data.get("desktop-notifier")
+                gemini_ok = isinstance(definition, dict) and bool(definition) and definition.get("enabled", True) is not False
+            except (OSError, ValueError, AttributeError):
+                pass
+        print(f"- {label + ':':18} {'[OK] Da tich hop hook' if gemini_ok else '[-] Chua cau hinh'}")
+
+    # 5. Codex
+    codex_hooks = USER_HOME / ".codex" / "hooks.json"
+    codex_script = USER_HOME / ".codex" / "notify.py"
+    codex_ok = False
+    if codex_hooks.exists() and codex_script.exists():
+        try:
+            import runpy
+            readable_command = runpy.run_path(str(codex_script))["readable_hook_command"]
+            hooks = json.loads(codex_hooks.read_text(encoding="utf-8")).get("hooks", {})
+            codex_ok = all(any(
+                "notify.py" in readable_command(handler.get("command", ""))
+                for entry in hooks.get(event, []) if isinstance(entry, dict)
+                for handler in entry.get("hooks", []) if isinstance(handler, dict)
+            ) for event in ("SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"))
+        except Exception:
+            pass
+    print(f"- OpenAI Codex:      {'[OK] Da tich hop hook' if codex_ok else '[-] Chua cau hinh'}")
+
+    # 6. Webhooks
+    webhook_ok = CONFIG_FILE.exists()
+    print(f"- Remote Webhooks:   {'[OK] Da cau hinh (' + str(CONFIG_FILE) + ')' if webhook_ok else '[-] Chua cau hinh (Tuy chon)'}")
+
+    print("=" * 60)
+    return 0
+
+
+def cmd_update():
+    """Updates AI Agent Desktop Notifier to the latest version."""
+    print("[INFO] Dang cap nhat AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if IS_WINDOWS:
+        if repo_dir and (repo_dir / "update.ps1").exists():
+            update_script = repo_dir / "update.ps1"
+            res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(update_script)])
+            return res.returncode
+        print("[ERROR] Khong tim thay update.ps1 cuc bo. Vui long cap nhat tu thu muc repository hoac ban release chinh thuc.")
+        return 1
+
+    if repo_dir and (repo_dir / "update.sh").exists():
+        update_script = repo_dir / "update.sh"
+        res = subprocess.run(["bash", str(update_script)])
+        return res.returncode
+
+    print("[ERROR] Khong tim thay update.sh cuc bo. Vui long cap nhat tu thu muc repository hoac ban release chinh thuc.")
+    return 1
+
+
+def cmd_uninstall():
+    """Uninstalls AI Agent Desktop Notifier and restores configuration backups."""
+    print("[INFO] Dang go cai dat AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if IS_WINDOWS:
+        candidate = (repo_dir / "scripts" / "uninstall.ps1") if repo_dir else None
+        if candidate and candidate.exists():
+            uninstall_script = candidate
+        elif repo_dir and (repo_dir / "uninstall.ps1").exists():
+            uninstall_script = repo_dir / "uninstall.ps1"
+        else:
+            uninstall_script = None
+
+        if uninstall_script:
+            res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(uninstall_script)])
+            return res.returncode
+        print("[ERROR] Khong tim thay uninstall.ps1 cuc bo. Vui long go cai dat tu thu muc repository.")
+        return 1
+
+    candidate = (repo_dir / "scripts" / "uninstall.sh") if repo_dir else None
+    if candidate and candidate.exists():
+        uninstall_script = candidate
+    elif repo_dir and (repo_dir / "uninstall.sh").exists():
+        uninstall_script = repo_dir / "uninstall.sh"
+    else:
+        uninstall_script = None
+
+    if uninstall_script:
+        res = subprocess.run(["bash", str(uninstall_script)])
+        return res.returncode
+
+    print("[ERROR] Khong tim thay uninstall.sh cuc bo. Vui long go cai dat tu thu muc repository.")
+    return 1
+
+
+def cmd_install():
+    """Installs or re-installs AI Agent Desktop Notifier."""
+    print("[INFO] Dang cai dat AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if IS_WINDOWS:
+        candidate = (repo_dir / "scripts" / "install.ps1") if repo_dir else None
+        if candidate and candidate.exists():
+            install_script = candidate
+        elif repo_dir and (repo_dir / "install.ps1").exists():
+            install_script = repo_dir / "install.ps1"
+        else:
+            install_script = None
+
+        if install_script:
+            res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(install_script)])
+            return res.returncode
+        print("[ERROR] Khong tim thay install.ps1 cuc bo.")
+        return 1
+
+    candidate = (repo_dir / "scripts" / "install.sh") if repo_dir else None
+    if candidate and candidate.exists():
+        install_script = candidate
+    elif repo_dir and (repo_dir / "install.sh").exists():
+        install_script = repo_dir / "install.sh"
+    else:
+        install_script = None
+
+    if install_script:
+        res = subprocess.run(["bash", str(install_script)])
+        return res.returncode
+
+    print("[ERROR] Khong tim thay install.sh cuc bo.")
+    return 1
+
+
+def cmd_config():
+    """Views or edits the webhook configuration."""
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        template = {
+            "webhooks": {
+                "slack": "",
+                "discord": "",
+                "bark": "",
+                "ntfy": "",
+                "feishu": "",
+                "dingtalk": ""
+            }
+        }
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(template, f, indent=2)
+        print(f"[OK] Da tao tep cau hinh mau tai {CONFIG_FILE}")
+
+    print(f"Duong dan tep cau hinh webhook: {CONFIG_FILE}")
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            print(f.read())
+    except Exception as e:
+        print(f"Loi doc tep cau hinh: {e}")
+    return 0
+
+
+def cmd_doctor():
+    """Runs a deep health check and diagnoses discrepancies between repo and installed runtime."""
+    print("=" * 60)
+    print(f"anoti Doctor (AI Agent Desktop Notifier) v{VERSION}")
+    print("=" * 60)
+
+    issues = 0
+    # 1. Check installed runtime engine
+    engine = get_notifier_path()
+    if not engine.exists():
+        print(f"[ERROR] Engine thong bao chua duoc cai dat tai: {engine}")
+        print("        Khuyen nghi: Chay 'anoti install' de cai dat.")
+        issues += 1
+    else:
+        print(f"[OK] Engine da cai dat tai: {engine}")
+        # Compare hash with repo if in repo and file is python script
+        repo_dir = get_repo_dir()
+        if repo_dir:
+            repo_engine = repo_dir / "bin" / "multi-desktop-notify.py"
+            if repo_engine.exists() and engine != repo_engine and engine.suffix == ".py":
+                import hashlib
+                with open(engine, "rb") as f1, open(repo_engine, "rb") as f2:
+                    h_installed = hashlib.sha256(f1.read()).hexdigest()
+                    h_repo = hashlib.sha256(f2.read()).hexdigest()
+                if h_installed != h_repo:
+                    print("[WARNING] File engine da cai dat KHAC voi ban ma nguon trong repository!")
+                    print("          Khuyen nghi: Chay 'anoti install' hoac './scripts/install.sh' de dong bo.")
+                    issues += 1
+                else:
+                    print("[OK] Phien ban engine da dong bo 100% voi repository.")
+
+    # 2. Check dependencies
+    if not IS_WINDOWS:
+        for tool in ["xdotool", "wmctrl"]:
+            res = subprocess.run(["which", tool], capture_output=True, text=True)
+            if res.returncode == 0:
+                print(f"[OK] Dependency: {tool} san sang ({res.stdout.strip()})")
+            else:
+                print(f"[WARNING] Dependency: {tool} chua duoc cai dat.")
+                issues += 1
+
+        sound_found = None
+        for snd in ["pw-play", "paplay", "canberra-gtk-play", "aplay"]:
+            res = subprocess.run(["which", snd], capture_output=True, text=True)
+            if res.returncode == 0:
+                sound_found = f"{snd} ({res.stdout.strip()})"
+                break
+        if sound_found:
+            print(f"[OK] Dependency am thanh: {sound_found}")
+        else:
+            print("[WARNING] Khong tim thay trinh phat am thanh (pw-play, paplay, canberra-gtk-play, aplay).")
+            issues += 1
+
+    # 3. Check Session / Queue cache permissions
+    runtime_dir = USER_HOME / ".local" / "state" / "ai-agent-notifier"
+    if runtime_dir.exists():
+        print(f"[OK] Runtime state directory: {runtime_dir}")
+    else:
+        print("[-] Runtime state directory chua duoc tao (se tu dong khoi tao khi chay).")
+
+    print("-" * 60)
+    if issues == 0:
+        print("[OK] He thong hoat dong hoan hao, khong phat hien van de nao.")
+    else:
+        print(f"[!] Phat hien {issues} van de can luu y.")
+    print("=" * 60)
+    return 0 if issues == 0 else 1
+
+
+def cmd_setup_hooks():
+    """Configures lifecycle notification hooks for Claude Code, Antigravity, and Codex."""
+    print("=" * 60)
+    print(f"anoti Setup Hooks v{VERSION} - {'Windows' if IS_WINDOWS else 'Linux'}")
+    print("=" * 60)
+
+    # 1. Locate hook source directory
+    repo_dir = get_repo_dir()
+    hooks_src = None
+    if repo_dir and (repo_dir / "hooks").exists():
+        hooks_src = repo_dir / "hooks"
+    elif Path("/usr/share/ai-agent-desktop-notifier/hooks").exists():
+        hooks_src = Path("/usr/share/ai-agent-desktop-notifier/hooks")
+    elif (Path(os.path.realpath(__file__)).parent / "hooks").exists():
+        hooks_src = Path(os.path.realpath(__file__)).parent / "hooks"
+
+    claude_hooks_dir = USER_HOME / ".claude" / "hooks"
+    codex_dir = USER_HOME / ".codex"
+    gemini_hooks_dir = USER_HOME / ".gemini" / "hooks"
+    gemini_config_dir = USER_HOME / ".gemini" / "config"
+    gemini_cli_dir = USER_HOME / ".gemini" / "antigravity-cli"
+
+    for d in (claude_hooks_dir, codex_dir, gemini_hooks_dir, gemini_config_dir, gemini_cli_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Copy hook adapters to user profile if available
+    if hooks_src:
+        import shutil
+        if not IS_WINDOWS:
+            mapping = [
+                ("claude-notify.sh", claude_hooks_dir / "notify-input.sh"),
+                ("claude-notify.py", claude_hooks_dir / "notify-claude.py"),
+                ("codex-notify.py", codex_dir / "notify.py"),
+                ("antigravity-notify.sh", gemini_hooks_dir / "notify-antigravity.sh"),
+                ("antigravity-notify.py", gemini_hooks_dir / "notify-antigravity.py"),
+            ]
+        else:
+            mapping = [
+                ("claude-notify.py", claude_hooks_dir / "notify-claude.py"),
+                ("codex-notify.py", codex_dir / "notify.py"),
+                ("antigravity-notify.py", gemini_hooks_dir / "notify-antigravity.py"),
+            ]
+        for src_name, dst_p in mapping:
+            src_p = hooks_src / src_name
+            if src_p.exists():
+                shutil.copy2(src_p, dst_p)
+                if not IS_WINDOWS:
+                    try:
+                        dst_p.chmod(0o755)
+                    except Exception:
+                        pass
+
+    # 2. Configure Claude Code (~/.claude/settings.json)
+    claude_settings = USER_HOME / ".claude" / "settings.json"
+    try:
+        cdata = json.loads(claude_settings.read_text(encoding="utf-8")) if claude_settings.exists() else {}
+    except Exception:
+        cdata = {}
+    if not isinstance(cdata, dict):
+        cdata = {}
+    if "hooks" not in cdata or not isinstance(cdata["hooks"], dict):
+        cdata["hooks"] = {}
+
+    if not IS_WINDOWS:
+        claude_cmd = str(claude_hooks_dir / "notify-input.sh")
+    else:
+        claude_cmd = f"python \"{claude_hooks_dir / 'notify-claude.py'}\""
+
+    target_claude = {
+        "SessionStart": [{"hooks": [{"type": "command", "command": claude_cmd}]}],
+        "PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": claude_cmd}]}],
+        "Notification": [{"matcher": "permission_prompt", "hooks": [{"type": "command", "command": claude_cmd}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": claude_cmd}]}],
+    }
+    for ev, entries in target_claude.items():
+        if ev not in cdata["hooks"] or not isinstance(cdata["hooks"][ev], list):
+            cdata["hooks"][ev] = []
+        filtered = [item for item in cdata["hooks"][ev] if "notify-input.sh" not in json.dumps(item) and "notify-claude.py" not in json.dumps(item) and "ai-agent-desktop-notifier" not in json.dumps(item)]
+        filtered.extend(entries)
+        cdata["hooks"][ev] = filtered
+    with open(claude_settings, "w", encoding="utf-8") as f:
+        json.dump(cdata, f, indent=2)
+    print("- Claude Code:       [OK] Da tich hop hook")
+
+    # 3. Configure Codex (~/.codex/hooks.json & ~/.codex/config.toml)
+    codex_hooks_file = codex_dir / "hooks.json"
+    codex_script = codex_dir / "notify.py"
+    if codex_script.exists():
+        try:
+            import runpy
+            runpy.run_path(str(codex_script))["remove_legacy_notify"](str(codex_dir / "config.toml"))
+        except Exception:
+            pass
+
+    data_hooks = {"description": "Desktop notifications for Codex", "hooks": {}}
+    if codex_hooks_file.exists():
+        try:
+            data_hooks = json.loads(codex_hooks_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    if not isinstance(data_hooks, dict):
+        data_hooks = {"description": "Desktop notifications for Codex", "hooks": {}}
+    if "hooks" not in data_hooks or not isinstance(data_hooks["hooks"], dict):
+        data_hooks["hooks"] = {}
+
+    codex_cmd = f"{sys.executable} \"{codex_script}\"" if IS_WINDOWS else f"/usr/bin/python3 {codex_script}"
+    perm_h = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": codex_cmd,
+                "timeout": 5,
+                "statusMessage": "Sending notification"
+            }
+        ]
+    }
+    for event_name in ("PermissionRequest", "SessionStart", "UserPromptSubmit", "Stop"):
+        existing = data_hooks["hooks"].get(event_name, [])
+        if not isinstance(existing, list):
+            existing = []
+        clean_hooks = None
+        if codex_script.exists():
+            try:
+                import runpy
+                clean_hooks = runpy.run_path(str(codex_script)).get("remove_notifier_hooks")
+            except Exception:
+                pass
+        if clean_hooks:
+            filtered = clean_hooks(existing)
+        else:
+            filtered = [item for item in existing if "notify.py" not in json.dumps(item)]
+        filtered.append(perm_h)
+        data_hooks["hooks"][event_name] = filtered
+    with open(codex_hooks_file, "w", encoding="utf-8") as f:
+        json.dump(data_hooks, f, indent=2)
+    print("- OpenAI Codex:      [OK] Da tich hop hook")
+
+    # 4. Configure Google Antigravity & Antigravity CLI
+    antigravity_script = gemini_hooks_dir / ("notify-antigravity.py" if IS_WINDOWS else "notify-antigravity.sh")
+    antigravity_cmd = f"{sys.executable} \"{antigravity_script}\"" if IS_WINDOWS else str(antigravity_script)
+    target_gemini = {
+        "PreInvocation": [{"type": "command", "command": antigravity_cmd, "timeout": 5}],
+        "PreToolUse": [{"matcher": "ask_question|AskUserQuestion", "hooks": [{"type": "command", "command": antigravity_cmd, "timeout": 10}]}],
+        "Stop": [{"type": "command", "command": antigravity_cmd, "timeout": 10}],
+        "Notification": [{"matcher": "permission_prompt|idle_prompt|agent_needs_input", "hooks": [{"type": "command", "command": antigravity_cmd, "timeout": 10}]}],
+    }
+
+    # Settings.json for Antigravity IDE
+    gemini_settings_file = USER_HOME / ".gemini" / "settings.json"
+    try:
+        sdata = json.loads(gemini_settings_file.read_text(encoding="utf-8")) if gemini_settings_file.exists() else {}
+    except Exception:
+        sdata = {}
+    if not isinstance(sdata, dict):
+        sdata = {}
+    if "hooks" not in sdata or not isinstance(sdata["hooks"], dict):
+        sdata["hooks"] = {}
+    for evt, entries in target_gemini.items():
+        if evt not in sdata["hooks"] or not isinstance(sdata["hooks"][evt], list):
+            sdata["hooks"][evt] = []
+        filtered = [item for item in sdata["hooks"][evt] if "notify-antigravity" not in json.dumps(item)]
+        filtered.extend(entries)
+        sdata["hooks"][evt] = filtered
+    with open(gemini_settings_file, "w", encoding="utf-8") as f:
+        json.dump(sdata, f, indent=2)
+
+    # hooks.json for config and antigravity-cli
+    for config_dir in (gemini_config_dir, gemini_cli_dir):
+        hook_file = config_dir / "hooks.json"
+        data = {}
+        if hook_file.exists():
+            try:
+                data = json.loads(hook_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        if not isinstance(data, dict):
+            data = {}
+        data["desktop-notifier"] = target_gemini
+        with open(hook_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    print("- Antigravity:       [OK] Da tich hop hook cho Antigravity va Antigravity CLI")
+
+    # 5. GNOME Shortcut on Linux
+    if not IS_WINDOWS:
+        try:
+            base_schema = "org.gnome.settings-daemon.plugins.media-keys"
+            binding_path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/anoti-focus/"
+            cmd_check = ["gsettings", "get", base_schema, "custom-keybindings"]
+            res = subprocess.check_output(cmd_check, text=True, stderr=subprocess.DEVNULL).strip()
+            if "anoti-focus" not in res:
+                import ast
+                current_list = ast.literal_eval(res) if res and res != "@as []" else []
+                if binding_path not in current_list:
+                    current_list.append(binding_path)
+                    subprocess.run(["gsettings", "set", base_schema, "custom-keybindings", str(current_list)], check=False)
+            subprocess.run(["gsettings", "set", f"{base_schema}.custom-keybinding:{binding_path}", "name", "AI Agent Notifier Focus"], check=False)
+            subprocess.run(["gsettings", "set", f"{base_schema}.custom-keybinding:{binding_path}", "command", "anoti focus"], check=False)
+            subprocess.run(["gsettings", "set", f"{base_schema}.custom-keybinding:{binding_path}", "binding", "<Alt>q"], check=False)
+            print("- Shortcut GNOME:    [OK] Da dang ky phim tat Alt+Q")
+        except Exception:
+            pass
+
+    print("=" * 60)
+    print("Cai dat va tich hop hook thanh cong!")
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("update", "up"):
+        sys.exit(cmd_update())
+    elif argv and argv[0] in ("uninstall", "remove", "rm"):
+        sys.exit(cmd_uninstall())
+    elif argv and argv[0] in ("install", "reinstall"):
+        sys.exit(cmd_install())
+    elif argv and argv[0] in ("setup-hooks", "setup", "hooks"):
+        sys.exit(cmd_setup_hooks())
+    elif argv and argv[0] in ("doctor", "doc", "check"):
+        sys.exit(cmd_doctor())
+    elif argv and argv[0] in ("focus", "f"):
+        sys.exit(cmd_focus())
+    elif argv and argv[0] in ("test", "t"):
+        title = argv[1] if len(argv) > 1 else "Kiểm tra thông báo"
+        msg = argv[2] if len(argv) > 2 else "Hệ thống thông báo hoạt động bình thường trên tất cả các màn hình."
+        sys.exit(cmd_test(title, msg))
+    elif argv and argv[0] in ("status", "st", "info"):
+        sys.exit(cmd_status())
+    elif argv and argv[0] in ("config", "cfg"):
+        sys.exit(cmd_config())
+
+    parser = argparse.ArgumentParser(
+        prog="anoti",
+        description="anoti - Fast, multi-monitor desktop notification CLI for AI agents (Claude Code, Antigravity, Codex).",
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        choices=["update", "uninstall", "install", "doctor", "test", "status", "config", "focus", "setup-hooks"],
+        help="Action to perform (update, uninstall, install, doctor, test, status, config, focus, setup-hooks)",
+    )
+    parser.add_argument(
+        "--focus", "-f",
+        dest="flag_focus",
+        action="store_true",
+        help="Focus the application window waiting for agent input.",
+    )
+    parser.add_argument(
+        "--setup-hooks",
+        dest="flag_setup_hooks",
+        action="store_true",
+        help="Integrate notification hooks for Claude Code, Antigravity, and Codex.",
+    )
+    parser.add_argument(
+        "--update", "-u",
+        dest="flag_update",
+        action="store_true",
+        help="Update notification system to the latest version.",
+    )
+    parser.add_argument(
+        "--uninstall",
+        dest="flag_uninstall",
+        action="store_true",
+        help="Uninstall notification system and restore backups.",
+    )
+    parser.add_argument(
+        "--install",
+        dest="flag_install",
+        action="store_true",
+        help="Install or re-install notification system.",
+    )
+    parser.add_argument(
+        "--test", "-t",
+        dest="flag_test",
+        action="store_true",
+        help="Send a test desktop notification across all monitors.",
+    )
+    parser.add_argument(
+        "--status", "-s",
+        dest="flag_status",
+        action="store_true",
+        help="Show integration and health status.",
+    )
+    parser.add_argument(
+        "--config", "-c",
+        dest="flag_config",
+        action="store_true",
+        help="View or setup webhook configuration.",
+    )
+    parser.add_argument(
+        "--title",
+        default="AI Agent Notification",
+        help="Notification title for custom message.",
+    )
+    parser.add_argument(
+        "--message", "-m",
+        default="",
+        help="Notification body text for custom message.",
+    )
+    parser.add_argument(
+        "--version", "-v",
+        action="store_true",
+        help="Show anoti version.",
+    )
+
+    args = parser.parse_args()
+
+    if args.version:
+        print(f"anoti v{VERSION}")
+        sys.exit(0)
+
+    if args.flag_focus or args.action == "focus":
+        sys.exit(cmd_focus())
+    if args.flag_setup_hooks or args.action == "setup-hooks":
+        sys.exit(cmd_setup_hooks())
+    if args.flag_update or args.action == "update":
+        sys.exit(cmd_update())
+    if args.flag_uninstall or args.action == "uninstall":
+        sys.exit(cmd_uninstall())
+    if args.flag_install or args.action == "install":
+        sys.exit(cmd_install())
+    if args.flag_test or args.action == "test":
+        sys.exit(cmd_test())
+    if args.flag_status or args.action == "status":
+        sys.exit(cmd_status())
+    if args.flag_config or args.action == "config":
+        sys.exit(cmd_config())
+
+    if args.message:
+        sys.exit(cmd_test(args.title, args.message))
+
+    cmd_status()
+    print("\nCac lenh nhanh:")
+    print("   anoti focus        # Focus ngay vao cua so AI agent dang cho phan hoi (Alt+Q)")
+    print("   anoti setup-hooks  # Tich hop hook vao Claude Code, Antigravity va Codex")
+    print("   anoti update       # Cap nhat phien ban moi nhat")
+    print("   anoti test         # Ban thong bao thu nghiem")
+    print("   anoti status       # Kiem tra trang thai tich hop")
+    print("   anoti uninstall    # Go cai dat va khoi phuc cau hinh")
+    print("   anoti --help       # Xem danh sach tuy chon\n")
+
+
+if __name__ == "__main__":
+    main()
